@@ -40,3 +40,5 @@ if __name__=='__main__':
         p.apply_async(get_data,args=(i,))
     p.close()
     p.join()
+还可以有改进的空间，比如，通过dff变量将每个进程的符合条件的df，利用pandas.concat进行连接，最后在将所以数据统一的输出到一个xlsx文件中
+，这里面涉及到在多进程中对共享变量的操作。
