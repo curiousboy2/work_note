@@ -1,0 +1,47 @@
+#对字典对象，按照特定的Key，进行md5加密
+from hashlib import md5
+def f(obj):
+	sorted(obj,key=lambda x:x[0])
+	for key,value in obj.items():
+		if key in ['id','fetchtime']:
+			continue
+		s='%s:%s' %(key,value)
+		yield s
+
+
+if __name__ == '__main__':
+	obj={'name':'nike','age':13}		
+	#pdb.set_trace()
+	s='__field__'.join(f(obj))
+	print(md5(s.encode('utf-8')).hexdigest())
+	
+
+
+l=['未变','--','增持2,513.76','减持0.00']
+
+str1='减持0.00'
+def f(str1):
+    if re.search('增持',str1) and re.search('\d+',str1):
+        num=re.search(r'\d+\.\d+',str1)
+        num=num.group()
+    elif re.search('减持',str1) and re.search('\d+',str1):
+        num=re.sub(r'减持','-',str1)
+    else:
+    	return 0
+    return float(num)
+
+
+将2,512.76变成2512.76
+
+    import re
+    reg=re.compile(',')
+    re.sub(reg,'',str1)
+
+
+[(12,),(13,)]===>[i[0] for i in l]
+
+join的使用
+'__field__'.join(['hello','world'])
+分隔符				iterable
+
+os.path.join(path1,path2,...)#连接路径
