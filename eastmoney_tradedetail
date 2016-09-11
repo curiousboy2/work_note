@@ -1,0 +1,233 @@
+import pymysql
+import requests
+import re
+import json
+import datetime as dt
+from datetime import datetime
+import hashlib
+from bs4 import BeautifulSoup
+from threading import Thread
+from queue import Queue
+
+queue_Scode_tdate=Queue()#
+
+"""
+抓取http://data.eastmoney.com/stock/tradedetail.html上的龙虎榜详情信息，以及解读链接后得额外信息
+"""
+
+
+config={'host':'127.0.0.1','user':'nike','passwd':'huanghu','db':'hello','charset':'utf8'}
+header = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; WOW64; rv:48.0) Gecko/20100101 Firefox/48.0'}
+
+#从数据库中取得最新数据的日期
+def capture_dates():
+    conn=pymysql.connect(**config)
+    cur=conn.cursor()
+    cur.execute('select Tdate from longhubang_eastmoney order by Tdate desc limit 1;')
+    one_record=cur.fetchone()
+    stop_time = datetime.now()
+    if one_record==None:
+        #latest_time='2004-06-01'
+        latest_time='2016-06-01'
+        start_time=datetime.strptime(latest_time,'%Y-%m-%d')
+
+        while True:
+            yield start_time,start_time+dt.timedelta(days=30)
+            start_time+=dt.timedelta(days=31)
+            if start_time>stop_time:
+                break
+    else:
+        latest_time=one_record[0]#日期格式
+        if (stop_time-latest_time).days<50:
+            yield latest_time+dt.timedelta(days=1),stop_time
+            return
+        else:
+            while True:
+                yield latest_time+dt.timedelta(days=1),latest_time+dt.timedelta(days=30)
+                latest_time+=dt.timedelta(days=31)
+                if latest_time>stop_time:
+                    break
+
+#取得在指定的时间段内数据的页数
+def pages_number(url):
+    r=requests.get(url,headers=header)
+    html = r.text
+    json_str = re.search(r'{.*}',html).group()
+    json_obj = json.loads(json_str, encoding='utf8')
+    return json_obj['pages']
+
+#根据网页上的一条数据，构建符合MySQL存储的记录
+"""
+代码				名称				收盘价				涨跌幅%				换手率%            龙虎榜净买额
+{"SCode":"000029","SName":"深深房A","ClosePrice":"10.79","Chgradio":"2.8599","Dchratio":"4.45","JmMoney":"-269895.
+				市场总成交额								上榜原因													龙虎榜卖出额
+660000004","Turnover":"400582021","Ntransac":"39677742","Ctypedes":"日振幅值达到15%的前五只证券","Oldid":"2172935","Smoney":"29369716.
+		龙虎榜买入额          龙虎榜成交额	         上榜日              净买额占总成交比(%)   成交额占总成交比
+74","Bmoney":"29099821.08","ZeMoney":"58469537.82","Tdate":"2015-09-08","JmRate":"-0.07",     "ZeRate":"14.
+      流通市值            解读
+60","Ltsz":"9621011400","JD":"广东资金买入，成功率35.71%","DP":"广东资金买入，成功率35.71%"}
+"""
+def gen_record(r_dict):
+    if r_dict['SName']=='':
+        return
+    list_temp=[]
+    list_temp.append(datetime.now().strftime('%Y-%m-%d'))
+    list_temp.extend([r_dict['SCode'],r_dict['SName'],r_dict['ClosePrice'],r_dict['Chgradio'],r_dict['Dchratio'],r_dict['JmMoney'],\
+                      r_dict['Turnover'],r_dict['Ctypedes'],r_dict['Smoney'],r_dict['Bmoney'],r_dict['ZeMoney'],r_dict['Tdate'],\
+                      r_dict['JmRate'],r_dict['ZeRate'],r_dict['Ltsz'],r_dict['JD']])
+    list_record=list(map(transfor_None,list_temp))
+    uuid=gen_uuid(list_record)
+    list_record.insert(0,uuid)
+    return list_record
+
+
+#将网页上的'-'，转换成None
+def transfor_None(value):
+    if value=='':
+        return None
+    else:
+        return value
+
+#产生uuid
+def gen_uuid(list_record):
+    m=hashlib.md5()
+    m.update(('{}{}{}{}'.format(list_record[1],list_record[8],list_record[-5],list_record[-1])).encode('utf8'))
+    return m.hexdigest()
+
+
+#处理一个网页上的数据
+def one_page(url):
+    global queue_Scode_tdate
+    r=requests.get(url,headers=header)
+    html = r.text
+    json_str = re.search(r'{.*}',html).group()
+    json_obj = json.loads(json_str, encoding='utf8')
+    page_data_list=json_obj['data']
+    SCode_Tdate_set=set()
+    for record in page_data_list:
+        SCode_Tdate_set.add((record['Tdate'],record['SCode']))
+    for (Tdate,SCode) in SCode_Tdate_set:
+        queue_Scode_tdate.put_nowait([Tdate,SCode])
+
+    conn=pymysql.connect(**config)
+    cur=conn.cursor()
+    sql_str='insert into longhubang_eastmoney values(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)'#数据库插入语句
+    for record in page_data_list:
+        #构建一条记录的数据库行的形式
+        record_list=gen_record(record)
+        cur.execute(sql_str,record_list)
+        print('&')
+    conn.commit()
+    cur.close()
+    conn.close()
+
+#处理指定时间区间中的数据
+def one_pair_date(pair_first,pair_second):
+    url_initial='http://data.eastmoney.com/DataCenter_V3/stock2016/TradeDetail/pagesize=100,page=1,sortRule=-1\
+    ,sortType=,startDate={},endDate={},gpfw=0,js=var%20data_tab_1.html'.format(pair_first,pair_second)
+    pages=pages_number(url_initial)
+    for page in range(1,pages+1):
+        url='http://data.eastmoney.com/DataCenter_V3/stock2016/TradeDetail/pagesize=100,page={},sortRule=-1\
+    ,sortType=,startDate={},endDate={},gpfw=0,js=var%20data_tab_1.html'.format(page,pair_first,pair_second)
+        one_page(url)
+
+#龙虎榜
+def LongHuBang():
+    global queue_Scode_tdate
+    for pair_date in capture_dates():
+        pair_first=pair_date[0].strftime('%Y-%m-%d')
+        pair_second=pair_date[1].strftime('%Y-%m-%d')
+        one_pair_date(pair_first,pair_second)
+    queue_Scode_tdate.put_nowait('Finished')
+    queue_Scode_tdate.put_nowait('Finished')
+
+#龙虎榜解读
+def LongHuBandJD():
+    global queue_Scode_tdate
+    while True:
+       Tdate_Scode_list=queue_Scode_tdate.get(block=True)
+       if Tdate_Scode_list=='Finished':
+           break
+       url='http://data.eastmoney.com/stock/lhb,{},{}.html'.format(Tdate_Scode_list[0],Tdate_Scode_list[1])
+       OneDJ(url,Tdate_Scode_list[0],Tdate_Scode_list[1])
+
+
+#处理一个解读的连接后的详细信息
+def OneDJ(url,Tdate,SCode):
+    fetchTime=datetime.now().strftime('%Y-%m-%d')
+    r=requests.get(url)
+    html=r.text
+    soup=BeautifulSoup(html,"html.parser")
+    divs=soup.find_all('div',attrs={'class':'content-sepe'})
+    div_Ctypedes=soup.find_all('div',attrs={'class':'left con-br'})
+    div_Ctypedes_list=list(map(lambda des:re.search('类型：(.*)',des.string).group(1) ,div_Ctypedes))
+    n=0
+    for div in divs:
+        Ctypedes=div_Ctypedes_list[n]
+        n=n+1
+        tables=div.find_all('table')
+        for table in tables:
+            conn=pymysql.connect(**config)
+            cur=conn.cursor()
+            title=table.find('th',attrs={'class':'th-title'}).text
+            trs=table.find_all('tr')
+            if '买入' in title:
+                TYPE='buy'
+                trs=trs[2:]
+            else:
+                TYPE='sell'
+                trs=trs[2:-1]
+
+            for tr in trs:
+                department=tr.find('a').text
+                tds_other=tr.find_all('td')[2:]
+                l=[td.text for td in tds_other]
+                record=[SCode,Tdate,fetchTime,Ctypedes,TYPE,department]
+                record.extend(l)
+                record.insert(0,GetDjUUid(record,url))
+                record_new=list(map(trans,record))
+                cur.execute('insert into longhubang_eastmoney_jd values(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)',record_new)
+                print('#')
+            conn.commit()
+            cur.close()
+            conn.close()
+    ####
+#将条目中的-转换成None
+def trans(value):
+    if value=='-':
+        return None
+    elif '%' in value:
+        m=re.match(r'.*%',value).group()
+        if m==value:
+            return value.split('%')[0]
+        else:
+            return value
+    else:
+        return value
+#获取DJ_uuid
+def GetDjUUid(record,url):
+    m=hashlib.md5()
+    m.update(('url:{}Ctypedes:{}TYPE:{}department:{}'.format(url,record[3],record[4],record[5])).encode('utf8'))
+    return m.hexdigest()
+
+
+
+if __name__=='__main__':
+
+    #OneDJ('http://data.eastmoney.com/stock/lhb,2016-09-09,000605.html','000605','2016-09-09')
+
+    threads=[]
+    longhubang_thread=Thread(target=LongHuBang)
+    longhubang_thread.start()
+    threads.append(longhubang_thread)
+    longhubang_JD_thread=Thread(target=LongHuBandJD)
+    longhubang_JD_thread.start()
+    threads.append(longhubang_JD_thread)
+    longhubang_JD_thread_2=Thread(target=LongHuBandJD)
+    longhubang_JD_thread_2.start()
+    threads.append(longhubang_JD_thread_2)
+    for thread in threads:
+        thread.join()
+    print('finished')
+
+
