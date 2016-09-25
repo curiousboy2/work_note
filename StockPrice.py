@@ -4,41 +4,43 @@ import tushare as ts
 from pandas import DataFrame
 import pandas as pd
 from multiprocessing import Pool
-import multiprocessing
+"""
+对比mysql中已经抓取的数据与tushare提供的数据，将数据中的价格误差在0.01以上的记录，通过excel输出
+"""
 
-#获取数据库中的股票代码，函数的返回类型为生成器
+config={'host':'','user':'','passwd':'','db':'','charset':'utf8'}
+
+#获取数据库中的股票代码列表，返回的数据类型是生成器
 def get_codelist():
-    conn=pymysql.connect(host='mech.palaspom.com',user='palas',passwd='lapas',db='iTrader',charset='utf8')
-    sql_st='SELECT ShortID FROM StockPrice GROUP BY ShortID ;'
+    conn=pymysql.connect(**config)
+    sql_st='SELECT distinct ShortID FROM StockPrice  ;'
     cur=conn.cursor()
     cur.execute(sql_st)
     s=cur.fetchall()
     for item in s:
-        for j in item:
-            yield j
+        yield item[0]
 
 #将有误差的dataframe格式的数据保存到c:/users/jeff/StockPrice目录中
-def get_data(i):
-    conn=pymysql.connect(host='mech.palaspom.com',user='palas',passwd='lapas',db='iTrader',charset='utf8')
+def get_data(code,excel):
+    conn=pymysql.connect(**config)
     sql_st="select Date as date,Open as open,High as high,Close as close,Low as low,Amount as volume, \
       AmountPrice as amount,Resumption as factor from StockPrice where Date>'2005-01-03' and\
-      Date<'2016-07-15' and ShortID=%s order by Date desc;" %i
-    df1=ts.get_h_data(code=i,start='2005-01-04',end='2016-07-04',autype='hfq',drop_factor=False)
+      Date<'2016-07-15' and ShortID={} order by Date desc;".format(i)
+    df1=ts.get_h_data(code=code,start='2005-01-04',end='2016-07-04',autype='hfq',drop_factor=False)
     df2=sql.read_sql_query(sql_st,conn,index_col='date')
     df3=df1-df2
     df=df3[(abs(df3.open)>=0.01)|(abs(df3.close)>=0.01)|(abs(df3.low)>=0.01)|(abs(df3.volume)>=0.01)|(abs(df3.amount)>=0.01)]
     if not df.empty:
         #对df增加一列，列的内容是股票的代码
             df.insert(len(df.columns), 'code_name', value=int(i))
-            df.to_excel('c:/users/jeff/StockPrice/'+i+'.xlsx')
-            
+            df.to_excel(excel,sheet_name=code)
+
 
 if __name__=='__main__':
-    #pdb.set_trace()
-    p=Pool(60)
+    p=Pool(10)
+    excel=pd.ExcelWriter('c:/users/jeff/StockPrice.xlsx')
     for i in get_codelist():
-        p.apply_async(get_data,args=(i,))
+        p.apply_async(get_data,args=(i,excel))
     p.close()
     p.join()
-还可以有改进的空间，比如，通过dff变量将每个进程的符合条件的df，利用pandas.concat进行连接，最后在将所以数据统一的输出到一个xlsx文件中
-，这里面涉及到在多进程中对共享变量的操作。
+    excel.save()
